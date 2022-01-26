@@ -1,0 +1,124 @@
+# SCRIPT TO COUNT HOTSPOT PIXELS IN Sentinel2 IMAGES with NHI
+# CODE WRITTEN BY J. VLAEMINCK, MASTER STUDENT VUB 
+
+import ee
+import math
+ee.Initialize()
+
+vulc = 'ERTA ALE (SUMMIT)'
+roi = ee.Geometry.Rectangle([40.6586, 13.6019, 40.6651, 13.6082])
+
+start = ee.Date("2016-01-01")
+finish = ee.Date("2022-01-01")
+
+print('## ANALYZING HOTSPOTS ##')
+print ('## FOR ' + vulc + ' ##')
+
+loc = ee.Geometry.Point([40.6618, 13.6050])
+
+collection = "COPERNICUS/S2"
+s2_coll= (ee.ImageCollection(collection)
+.filterDate(start, finish)
+.filterBounds(loc))
+#.sort('system:time_start'))
+
+imagelist = s2_coll.toList(s2_coll.size())
+#print('List of images: ', imagelist)
+def addlist(list):
+  return ee.Image(list).id()
+idlist = imagelist.map(addlist)
+
+#print('List of IDs : ' , idlist)
+
+def addlist2(list):
+  id = ee.Image(list).id()
+  year = id.slice(0,4)
+  month = id.slice(4,6)
+  day = id.slice(6,8)
+  return ee.Feature(ee.Geometry.Point(0,0), {'date' : ee.String(year).cat(month).cat(day)})
+datelist = imagelist.map(addlist2)
+datelist = datelist.distinct()
+
+
+#print(' List of dates: ', datelist)
+FCdates = ee.FeatureCollection(ee.List(datelist))
+LIST = ee.List([])
+Dates = ee.List([])
+
+def HTDfunction(image, LIST):
+
+  B12_irr = image.metadata('SOLAR_IRRADIANCE_B12')
+  B11_irr = image.metadata('SOLAR_IRRADIANCE_B11')
+  B8a_irr = image.metadata('SOLAR_IRRADIANCE_B8A')
+  sun_zenith = image.metadata('MEAN_SOLAR_ZENITH_ANGLE')
+  sun_zenith = sun_zenith.cos()
+  correction = image.metadata('REFLECTANCE_CONVERSION_CORRECTION')
+  correction = (correction.pow(-1)).multiply(math.pi)
+
+  LB12 = (((image.select('B12').multiply(sun_zenith)).multiply(B12_irr)).divide(correction)).divide(10000)
+  LB11 = (((image.select('B11').multiply(sun_zenith)).multiply(B11_irr)).divide(correction)).divide(10000)
+  LB8A = (((image.select('B8A').multiply(sun_zenith)).multiply(B8a_irr)).divide(correction)).divide(10000)
+
+
+  alpha1 = (LB12.subtract(LB11)).divide(LB12.add(LB11))
+  alpha2 = (LB11.subtract(LB8A)).divide(LB11.add(LB8A))
+
+
+  NHI_alpha_raw = image.where(alpha1.gte(0),1)
+  NHI_alpha_raw2 = NHI_alpha_raw.where(alpha2.gte(0),1)
+  NHI_alpha = NHI_alpha_raw2.where(NHI_alpha_raw2.neq(1),0)
+
+  LB12_raw = image.where(LB12.gte(3),1)
+  LB12_fin = LB12_raw.where(LB12_raw.neq(1),0)
+
+  LB11_raw = image.where(LB11.gte(3), 1)
+  LB11_fin = LB11_raw.where(LB11_raw.neq(1),0)
+
+  NHI_total = image.expression('NHI_alpha + LB12_fin + LB11_fin', {'NHI_alpha' : NHI_alpha, 'LB12_fin' : LB12_fin , 'LB11_fin' : LB11_fin })
+  NHI_raw = NHI_total.where(NHI_total.eq(3),1)
+  NHI = NHI_raw.where(NHI_total.neq(3),0)
+  
+  hotspot = image.where(NHI.eq(0),0)
+  Hotspot = hotspot.where(NHI.eq(1), 1)
+
+  clipped = Hotspot.clip(roi)
+  Mask = clipped.selfMask()
+  count = Mask.reduceRegion(ee.Reducer.count(),Mask.geometry(), 20)
+  return ee.List(LIST).add(ee.Feature(ee.Geometry.Point(0,0), {'value' : count.get('B1')}))
+
+def Datefunction(image, Dates):
+  
+  return ee.List(Dates).add(ee.Feature(ee.Geometry.Point(0,0), {'date' : image.date().format('YYYYMMdd')}))
+
+
+maskcollection = s2_coll.iterate(HTDfunction, LIST)
+maskcollection = ee.FeatureCollection(ee.List(maskcollection))
+datecollection = s2_coll.iterate(Datefunction, Dates)
+datecollection = ee.FeatureCollection(ee.List(datecollection))
+filter = ee.Filter.equals(leftField= 'system:index', rightField= 'system:index')
+
+innerJoin= ee.Join.inner()
+Joined = innerJoin.apply(datecollection, maskcollection, filter)
+
+str_start = start.format('YYYYMMdd').getInfo()
+str_finish = finish.format('YYYYMMdd').getInfo()
+filename = 'S2_NHI_hotspot_count_Erta_Ale_summit_ '+str_start +'_'+ str_finish
+
+#import csv
+#output_file = open("/Users/jochenvlaeminck/Documents/Thesis/scripts test/filenametest.csv", 'w')
+#datawriter = csv.writer(output_file)
+#datawriter.writerows(Joined)
+#output_file.close()
+
+task =ee.batch.Export.table.toDrive(**{
+  'collection': Joined,
+  'description': filename,
+  'folder': 'fromGEE',
+  'fileNamePrefix': filename,
+  'fileFormat': 'CSV',
+  'selectors' : ['primary.date, secondary.value']
+  }
+)
+task.start()
+#test_list = s2_coll.getRegion(loc, 1000).getInfo()
+#test_list[:5]
