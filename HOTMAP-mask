@@ -1,89 +1,127 @@
-from osgeo import gdal, gdal_array
-import numpy as np
-import os
-import glob
-directory = r'/Users/jochenvlaeminck/Documents/Thesis/Images/Erta_Ale/'
-savedirectory = '/Users/jochenvlaeminck/Documents/Thesis/Masks/Erta_Ale/'
-for filename in os.listdir(directory):
-    if filename.endswith('.tif'):
-        input_path = os.path.join(directory, filename)
-        ds = gdal.Open(input_path, gdal.GA_ReadOnly)
-        #ds = gdal.Open('/Users/jochenvlaeminck/Documents/Thesis/Images/S2_Erta_Ale_B12118A_2020-11-14.tif')
-        b12 = ds.GetRasterBand(1)
-        b11 = ds.GetRasterBand(2)
-        b8a = ds.GetRasterBand(3)
-        b8a_array = b8a.ReadAsArray()
-        b12_array = b12.ReadAsArray()
-        b11_array = b11.ReadAsArray()
+# script to select, display and export SENTINEL-2 SWIR DATA
 
-        b8a_array = b8a_array/10000
-        b12_array = b12_array/10000
-        b11_array = b11_array/10000
+# (c) B. Smets, Royal Museum for Central Africa, Belgium
 
+import ee
+import geemap
+ee.Initialize()
+start = ee.Date("2016-01-01")
+finish = ee.Date("2022-01-01")
 
-        alpha1 = b12_array/b11_array
-        alpha2 = b12_array/b8a_array
+image_select_last = "auto"
+image_number = 0
 
-        beta1 = b11_array/b8a_array
+roi_export = "yes"
 
-        alpha_A_raw = alpha1 >= 1.4
-        alpha_A_raw = alpha_A_raw.astype(int)
+roi = ee.Geometry.Rectangle([40.6586, 13.6019, 40.6651, 13.6082])
 
-        alpha_B_raw = alpha2 >= 1.4
-        alpha_B_raw = alpha_B_raw.astype(int)
+locx= 40.6618
+locy= 13.6050
+zoom = 14
 
-        alpha_C_raw = b12_array >= 0.15
-        alpha_C_raw = alpha_C_raw.astype(int)
+collection = "COPERNICUS/S2"
+s2_coll = (ee.ImageCollection(collection)
+.filterDate(start, finish)
+.filterBounds(roi))
 
-        Alpha_total = alpha_A_raw + alpha_C_raw +alpha_C_raw
+imagelist= s2_coll.toList(s2_coll.size())
 
-        Alpha = Alpha_total == 3
-        Alpha = Alpha.astype(int)
+list_length_raw = ee.String(imagelist.length())
+list_length_str = list_length_raw.getInfo()
+image_number_auto = list_length_str-1
 
-        s = b12_array > 1 #adapt
-        s = s.astype(int)
-        ss = b11_array > 1 #adapt
-        ss = ss.astype(int)
-        S= s + ss
-        S = S >=1
-        S = S.astype(int)
+def addlist(list):
+  return ee.Image(list).id()
+idlist = imagelist.map(addlist)
 
-        beta_A_raw = beta1 >= 2
-        beta_A_raw = beta_A_raw.astype(int)
+def HOTMAP(image):
+  alpha1 = image.expression('B12/B11', {'B12': image.select('B12'), 'B11' : image.select('B11')})
+  alpha2 = image.expression('B12/B8A', {'B12': image.select('B12'), 'B8A' : image.select('B8A')})
 
-        beta_B_raw = b11_array >= 0.5
-        beta_B_raw = beta_B_raw.astype(int)
+  beta1 = image.expression('B11/B8A', {'B11': image.select('B11'), 'B8A' : image.select('B8A')})
 
-        beta_AB = beta_A_raw + beta_B_raw
+  B12 = image.select('B12').divide(10000)
+  B11 = image.select('B11').divide(10000)
 
-        beta_C_raw = beta_AB == 2
-        beta_C_raw = beta_C_raw.astype(int)
+  alpha_A_raw = image.where(alpha1.gte(1.4),1)
+  alpha_A = alpha_A_raw.where(alpha_A_raw.neq(1), 0)
 
-        beta_D_raw = beta_C_raw + S
-        beta_D = beta_D_raw >= 1
-        beta_D = beta_D.astype(int)
+  alpha_B_raw = image.where(alpha2.gte(1.4),1)
+  alpha_B = alpha_B_raw.where(alpha_B_raw.neq(1),0)
 
-        (dim_x , dim_y) = np.shape(b11_array)
-        helper = np.zeros(b11_array.shape)
-        kernel = np.array ([[1,1,1],[1,0,1],[1,1,1]])
-        for i in range (1, dim_x-1):
-            for j in range(1, dim_y-1):
-                kernel_array = Alpha[i-1:i+2, j-1:j+2]
-                Cluster = np.sum(kernel_array*kernel)
-                helper[i,j] = Cluster.sum()
-                if (beta_D[i,j]==0):
-                    helper[i,j]= -1000000
+  alpha_C_raw = image.where(B12.gte(0.15),1)
+  alpha_C = alpha_C_raw.where(alpha_C_raw.neq(1),0)
 
-        helper = helper >=1
-        helper = helper.astype(int)
+  Alpha_total = image.expression('alpha + alphaa + alphaaa', { 'alpha' : alpha_A, 'alphaa': alpha_B, 'alphaaa': alpha_C})
 
-        Hotspot = Alpha + helper
-        Hotspot = Hotspot >=1
-        Hotspot = Hotspot.astype(int)
+  Alpha_raw = Alpha_total.where(Alpha_total.eq(3),1)
+  Alpha = Alpha_raw.where(Alpha_total.neq(3),0)
+  s = image.where(B11.gt(1),1)
+  ss= s.where(B12.gt(1),1)
+  S= ss.where(ss.neq(1),0)
 
-        savepath = os.path.join(savedirectory, 'masked_'+filename)
+  beta_A_raw = image.where(beta1.gte(2),1)
+  beta_A = beta_A_raw.where(beta_A_raw.neq(1),0)
 
-        gdal_array.SaveArray(Hotspot.astype("float32"),savepath,'GTIFF',ds)
+  beta_B_raw = image.where(B11.gte(0.5),1)
+  beta_B = beta_B_raw.where(beta_B_raw.neq(1),0)
 
-        ds = None
+  beta_AB = image.expression('beta+betaa', { 'beta': beta_A, 'betaa': beta_B,})
+
+  beta_C_raw = beta_AB.where(beta_AB.eq(2),1)
+  beta_C = beta_C_raw.where(beta_C_raw.neq(1),0)
+
+  beta_D_raw = beta_C.where(beta_C.eq(1),1)
+  beta_D = beta_D_raw.where(S.eq(1),1)
+
+  Beta = beta_D.where(beta_D.neq(1),0)
+
+  Hot_pixels_raw = image.where(Beta.eq(0),0)
+  Hot_pixels_raw2 = Hot_pixels_raw.where(Alpha.eq(0),0)
+  Hot_pixels_raw3 = Hot_pixels_raw2.where(Beta.eq(1),1)
+  Hot_pixels = Hot_pixels_raw3.where(Alpha.eq(1),1)
+
+  hotspot = image.where(Alpha.eq(0),0)
+  hotspot1 = hotspot.where(Beta.eq(0),0)
   
+  Cluster = Hot_pixels.connectedComponents(connectedness = ee.Kernel.square(1), maxSize = 128)
+  Cluster = Cluster.select(['labels'])
+  Cluster = Alpha.addBands(Cluster.select('labels'))
+  True_clusters = Cluster.reduceConnectedComponents(reducer = ee.Reducer.mean(), labelBand = 'labels')
+  Hotspot = hotspot1.where(True_clusters.gt(0),1)
+  clipped = Hotspot.clip(roi)
+  Mask = clipped.selfMask()
+
+  return ee.Image(Mask) 
+List = []
+for x in range(0,image_number_auto):
+  imageID1 = imagelist.get(x)
+  image1 = ee.Image(imageID1)
+  image_date2 = ee.Date(image1.get('system:time_start')).format('YYYY-MM-dd')
+  image1 = HOTMAP(image1)
+  if image_date2.getInfo() in List:
+    continue
+  List.append(image_date2.getInfo())
+  visParams = {
+    'bands': ['B1'],
+    min: -100,
+    max: 12000
+  }
+  Map = geemap.Map(center=[locx,locy], zoom= zoom)
+  Map.addLayer(image1.clip(roi), visParams)
+
+  description = 'Export_S2_HOTMAP_Mask_image_' + image_date2.getInfo()
+  export_name = 'S2_Erta_Ale_HOTMAP_' + image_date2.getInfo()
+  image_to_export = image1.select(['B1'])
+  task = ee.batch.Export.image.toDrive(**{
+      'image': image_to_export.toInt(),
+      'description': description,
+      'folder': 'Hotspot_masks/HOTMAP/S2/Erta_Ale',
+      'fileNamePrefix': export_name,
+      'scale': 20,
+      'region': roi,
+      'fileFormat': 'GeoTIFF'
+  })
+  task.start()
+
+
