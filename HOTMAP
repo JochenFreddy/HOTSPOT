@@ -1,0 +1,163 @@
+"""
+//////////////////////////////////////////////////////////////////////////////
+//      SCRIPT TO COUNT HOTSPOT PIXELS IN SENTINEL-2 IMAGES IN PYTHON       //
+//    (c) J. Vlaeminck VUB student under the supervision of:                //
+//        B. Smets, Royal Museum for Central Africa, Belgium                //
+//                                                                 //
+// CITATION:                                                       //
+// Smets, B. (2021) - Script to count hotspot pixels in            //
+// Sentinel-2 images, in Google Earth Engine.                      //
+// https://github.com/besmets/GEE_Scripts.                         //
+// Accessed online on DD/MM/YYYY.                                  //
+//                                                                 //                            
+///////////////////////////////////////////////////////////////////// """
+import ee
+ee.Initialize()
+""" VARIABLES """
+vulc = 'ERTA ALE (SUMMIT)'
+roi = ee.Geometry.Rectangle([40.6586, 13.6019, 40.6651, 13.6082])
+
+start = ee.Date("2016-01-01")
+finish = ee.Date("2022-01-01")
+
+print('## ANALYZING HOTSPOTS ##')
+print ('## FOR ' + vulc + ' ##')
+
+loc = ee.Geometry.Point([40.6618, 13.6050])
+
+collection = "COPERNICUS/S2"
+s2_coll= (ee.ImageCollection(collection)
+.filterDate(start, finish)
+.filterBounds(loc))
+#.sort('system:time_start'))
+
+imagelist = s2_coll.toList(s2_coll.size())
+#print('List of images: ', imagelist)
+def addlist(list):
+  return ee.Image(list).id()
+idlist = imagelist.map(addlist)
+
+#print('List of IDs : ' , idlist)
+
+def addlist2(list):
+  id = ee.Image(list).id()
+  year = id.slice(0,4)
+  month = id.slice(4,6)
+  day = id.slice(6,8)
+  return ee.Feature(ee.Geometry.Point(0,0), {'date' : ee.String(year).cat(month).cat(day)})
+datelist = imagelist.map(addlist2)
+datelist = datelist.distinct()
+
+
+#print(' List of dates: ', datelist)
+FCdates = ee.FeatureCollection(ee.List(datelist))
+LIST = ee.List([])
+Dates = ee.List([])
+def HTDfunction(image, LIST):
+  alpha1 = image.expression('B12/B11', {'B12': image.select('B12'), 'B11' : image.select('B11')})
+  alpha2 = image.expression('B12/B8A', {'B12': image.select('B12'), 'B8A' : image.select('B8A')})
+
+  beta1 = image.expression('B11/B8A', {'B11': image.select('B11'), 'B8A' : image.select('B8A')})
+
+  # As the Sentinel 2 image returns the band reflectance values multiplied by 10000 it is necessary to rescale these to the original values to be able to compare the values to the threshhold
+
+  B12 = image.select('B12').divide(10000)
+  B11 = image.select('B11').divide(10000)
+
+  alpha_A_raw = image.where(alpha1.gte(1.4),1)
+  alpha_A = alpha_A_raw.where(alpha_A_raw.neq(1), 0)
+
+  alpha_B_raw = image.where(alpha2.gte(1.4),1)
+  alpha_B = alpha_B_raw.where(alpha_B_raw.neq(1),0)
+
+  alpha_C_raw = image.where(B12.gte(0.15),1)
+  alpha_C = alpha_C_raw.where(alpha_C_raw.neq(1),0)
+
+  Alpha_total = image.expression('alpha + alphaa + alphaaa', { 'alpha' : alpha_A, 'alphaa': alpha_B, 'alphaaa': alpha_C})
+
+  Alpha_raw = Alpha_total.where(Alpha_total.eq(3),1)
+  Alpha = Alpha_raw.where(Alpha_total.neq(3),0)
+
+  # Band reflectance is saturated when the value is greater than 1
+  s = image.where(B11.gt(1),1)
+  ss= s.where(B12.gt(1),1)
+  S= ss.where(ss.neq(1),0)
+
+  beta_A_raw = image.where(beta1.gte(2),1)
+  beta_A = beta_A_raw.where(beta_A_raw.neq(1),0)
+
+  beta_B_raw = image.where(B11.gte(0.5),1)
+  beta_B = beta_B_raw.where(beta_B_raw.neq(1),0)
+
+  beta_AB = image.expression('beta+betaa', { 'beta': beta_A, 'betaa': beta_B,})
+
+  beta_C_raw = beta_AB.where(beta_AB.eq(2),1)
+  beta_C = beta_C_raw.where(beta_C_raw.neq(1),0)
+
+  beta_D_raw = beta_C.where(beta_C.eq(1),1)
+  beta_D = beta_D_raw.where(S.eq(1),1)
+
+  Beta = beta_D.where(beta_D.neq(1),0)
+
+  # A pixel is a potential Hot-pixel when it has a value of one for eiter Alpha or Beta
+  # To cluster the potential hot-pixels an image is created where both values are combined
+  Hot_pixels_raw = image.where(Beta.eq(0),0)
+  Hot_pixels_raw2 = Hot_pixels_raw.where(Alpha.eq(0),0)
+  Hot_pixels_raw3 = Hot_pixels_raw2.where(Beta.eq(1),1)
+  Hot_pixels = Hot_pixels_raw3.where(Alpha.eq(1),1)
+
+  hotspot = image.where(Alpha.eq(0),0)
+  hotspot1 = hotspot.where(Beta.eq(0),0)
+
+  # Using Moore's neighbourhood algorithm we create an extra band in the image which gives an INT label stating to which cluster a pixel belongs
+  # As Murphy et al. stated a cluster can be seen as a true hot-pixel cluster when the cluster contains one or more Alpha-pixels
+  # To check for the presence of Alpha pixels the mean value of the Alpha binary map is taken, if any Alpha pixel is in the cluster the mean value should be larger than 0
+  Cluster = Hot_pixels.connectedComponents(connectedness = ee.Kernel.square(1), maxSize = 128)
+  Cluster = Cluster.select(['labels'])
+  Cluster = Alpha.addBands(Cluster.select('labels'))
+  True_clusters = Cluster.reduceConnectedComponents(reducer = ee.Reducer.mean(), labelBand = 'labels')
+  Hotspot = hotspot1.where(True_clusters.gt(0),1)
+
+
+  clipped = Hotspot.clip(roi)
+  Mask = clipped.selfMask()
+  count = Mask.reduceRegion(ee.Reducer.count(),Mask.geometry(), 20)
+  return ee.List(LIST).add(ee.Feature(ee.Geometry.Point(0,0), {'value' : count.get('B1')}))
+
+def Datefunction(image, Dates):
+  
+  return ee.List(Dates).add(ee.Feature(ee.Geometry.Point(0,0), {'date' : image.date().format('YYYYMMdd')}))
+
+
+maskcollection = s2_coll.iterate(HTDfunction, LIST)
+maskcollection = ee.FeatureCollection(ee.List(maskcollection))
+datecollection = s2_coll.iterate(Datefunction, Dates)
+datecollection = ee.FeatureCollection(ee.List(datecollection))
+
+filter = ee.Filter.equals(leftField= 'system:index', rightField= 'system:index')
+
+innerJoin= ee.Join.inner()
+Joined = innerJoin.apply(datecollection, maskcollection, filter)
+
+str_start = start.format('YYYYMMdd').getInfo()
+str_finish = finish.format('YYYYMMdd').getInfo()
+filename = 'S2_hotspot_count_Erta_Ale_summit_'+str_start +'_'+ str_finish
+
+#import csv
+#output_file = open("/Users/jochenvlaeminck/Documents/Thesis/scripts test/filenametest.csv", 'w')
+#datawriter = csv.writer(output_file)
+#datawriter.writerows(Joined)
+#output_file.close()
+
+task =ee.batch.Export.table.toDrive(**{
+  'collection': Joined,
+  'description': filename,
+  'folder': 'fromGEE',
+  'fileNamePrefix': filename,
+  'fileFormat': 'CSV',
+  'selectors' : ['primary.date, secondary.value']
+  }
+)
+task.start()
+#test_list = s2_coll.getRegion(loc, 1000).getInfo()
+#test_list[:5]
