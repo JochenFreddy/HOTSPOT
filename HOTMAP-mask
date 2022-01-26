@@ -1,0 +1,89 @@
+from osgeo import gdal, gdal_array
+import numpy as np
+import os
+import glob
+directory = r'/Users/jochenvlaeminck/Documents/Thesis/Images/Erta_Ale/'
+savedirectory = '/Users/jochenvlaeminck/Documents/Thesis/Masks/Erta_Ale/'
+for filename in os.listdir(directory):
+    if filename.endswith('.tif'):
+        input_path = os.path.join(directory, filename)
+        ds = gdal.Open(input_path, gdal.GA_ReadOnly)
+        #ds = gdal.Open('/Users/jochenvlaeminck/Documents/Thesis/Images/S2_Erta_Ale_B12118A_2020-11-14.tif')
+        b12 = ds.GetRasterBand(1)
+        b11 = ds.GetRasterBand(2)
+        b8a = ds.GetRasterBand(3)
+        b8a_array = b8a.ReadAsArray()
+        b12_array = b12.ReadAsArray()
+        b11_array = b11.ReadAsArray()
+
+        b8a_array = b8a_array/10000
+        b12_array = b12_array/10000
+        b11_array = b11_array/10000
+
+
+        alpha1 = b12_array/b11_array
+        alpha2 = b12_array/b8a_array
+
+        beta1 = b11_array/b8a_array
+
+        alpha_A_raw = alpha1 >= 1.4
+        alpha_A_raw = alpha_A_raw.astype(int)
+
+        alpha_B_raw = alpha2 >= 1.4
+        alpha_B_raw = alpha_B_raw.astype(int)
+
+        alpha_C_raw = b12_array >= 0.15
+        alpha_C_raw = alpha_C_raw.astype(int)
+
+        Alpha_total = alpha_A_raw + alpha_C_raw +alpha_C_raw
+
+        Alpha = Alpha_total == 3
+        Alpha = Alpha.astype(int)
+
+        s = b12_array > 1 #adapt
+        s = s.astype(int)
+        ss = b11_array > 1 #adapt
+        ss = ss.astype(int)
+        S= s + ss
+        S = S >=1
+        S = S.astype(int)
+
+        beta_A_raw = beta1 >= 2
+        beta_A_raw = beta_A_raw.astype(int)
+
+        beta_B_raw = b11_array >= 0.5
+        beta_B_raw = beta_B_raw.astype(int)
+
+        beta_AB = beta_A_raw + beta_B_raw
+
+        beta_C_raw = beta_AB == 2
+        beta_C_raw = beta_C_raw.astype(int)
+
+        beta_D_raw = beta_C_raw + S
+        beta_D = beta_D_raw >= 1
+        beta_D = beta_D.astype(int)
+
+        (dim_x , dim_y) = np.shape(b11_array)
+        helper = np.zeros(b11_array.shape)
+        kernel = np.array ([[1,1,1],[1,0,1],[1,1,1]])
+        for i in range (1, dim_x-1):
+            for j in range(1, dim_y-1):
+                kernel_array = Alpha[i-1:i+2, j-1:j+2]
+                Cluster = np.sum(kernel_array*kernel)
+                helper[i,j] = Cluster.sum()
+                if (beta_D[i,j]==0):
+                    helper[i,j]= -1000000
+
+        helper = helper >=1
+        helper = helper.astype(int)
+
+        Hotspot = Alpha + helper
+        Hotspot = Hotspot >=1
+        Hotspot = Hotspot.astype(int)
+
+        savepath = os.path.join(savedirectory, 'masked_'+filename)
+
+        gdal_array.SaveArray(Hotspot.astype("float32"),savepath,'GTIFF',ds)
+
+        ds = None
+  
